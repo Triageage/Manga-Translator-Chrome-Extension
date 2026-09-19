@@ -134,7 +134,8 @@
     if (state.root?.isConnected) return state.root;
     state.root = document.createElement("div");
     state.root.id = "mot-root";
-    state.root.setAttribute("aria-hidden", "true");
+    state.root.setAttribute("role", "region");
+    state.root.setAttribute("aria-label", "Manga Translator Overlays");
     document.documentElement.appendChild(state.root);
     return state.root;
   }
@@ -199,6 +200,31 @@
       .replace(/>/g, "&gt;")
       .replace(/"/g, "&quot;")
       .replace(/'/g, "&#039;");
+  }
+
+  function showToast(message, duration = 4000, type = "info") {
+    const existing = document.querySelector(".mot-toast");
+    existing?.remove();
+
+    const toast = document.createElement("div");
+    toast.className = `mot-toast ${type}`;
+    const icon = type === "error" ? "⚠️" : (type === "success" ? "✅" : "ℹ️");
+    toast.innerHTML = `
+      <span class="mot-toast-icon">${icon}</span>
+      <div class="mot-toast-content">${escapeHtml(message)}</div>
+      <button class="mot-toast-close" title="Dismiss">✕</button>
+    `;
+
+    document.body.appendChild(toast);
+    toast.querySelector(".mot-toast-close")?.addEventListener("click", () => toast.remove());
+
+    setTimeout(() => {
+      if (toast.isConnected) {
+        toast.style.opacity = "0";
+        toast.style.transform = "translateY(12px)";
+        setTimeout(() => toast.remove(), 250);
+      }
+    }, duration);
   }
 
   /* =========================================================================
@@ -273,19 +299,23 @@
 
     if (src.startsWith("data:image/")) return src;
 
-    // Try background script fetch first (bypasses CORS restrictions)
+    // 1. Background script fetch bypasses cross-origin restrictions via extension host permissions
     try {
       const fetched = await sendMessage({
         type: "FETCH_IMAGE",
-        url: src,
-        pageUrl: location.href
+        url: src
       });
       if (fetched?.ok && fetched.dataUrl) {
         return fetched.dataUrl;
       }
-    } catch {}
+      if (fetched?.error) {
+        console.warn("[ScanTranslator] Background fetch image error:", fetched.error);
+      }
+    } catch (err) {
+      console.warn("[ScanTranslator] FETCH_IMAGE message error:", err);
+    }
 
-    // Fallback to local canvas if same-origin
+    // 2. Fallback to local canvas if same-origin
     return imageToDataUrlViaCanvas(img);
   }
 
@@ -602,12 +632,14 @@
      ========================================================================= */
 
   function downscaleForAI(image, maxDimension = 1280) {
+    // If using local Ollama, downscale to 1000px to drastically cut token patch count on CPU
+    const maxDim = (state.settings.provider || "").toLowerCase() === "ollama" ? 1000 : maxDimension;
     const w = image.naturalWidth;
     const h = image.naturalHeight;
-    if (w <= maxDimension && h <= maxDimension) {
+    if (w <= maxDim && h <= maxDim) {
       return image.src;
     }
-    const scale = maxDimension / Math.max(w, h);
+    const scale = maxDim / Math.max(w, h);
     const canvas = document.createElement("canvas");
     canvas.width = Math.round(w * scale);
     canvas.height = Math.round(h * scale);
@@ -644,8 +676,15 @@
       return;
     }
 
+    const provider = (state.settings.provider || "gemini").toLowerCase();
+    const isOllama = provider === "ollama";
+    const statusMsg = isOllama
+      ? `Analyzing with Local AI (${state.settings.model || "minicpm-v"})…`
+      : "Translating Manga…";
+
     record.status = "working";
-    showProcessingBadge(record, true);
+    record.error = null;
+    showProcessingBadge(record, true, statusMsg);
 
     try {
       const rawDataUrl = await getImageDataUrl(img);
@@ -683,6 +722,7 @@
       record.error = err instanceof Error ? err.message : String(err);
       console.warn("[ScanTranslator] Image translation failed:", record.error, img);
       showProcessingBadge(record, false);
+      showToast(`Translation failed: ${record.error}`, 5000, "error");
     }
   }
 
@@ -911,19 +951,23 @@
     record.toggleBtn = null;
   }
 
-  function showProcessingBadge(record, isProcessing) {
+  function showProcessingBadge(record, isProcessing, statusText = "Translating Manga…") {
     const existing = record.img.parentNode?.querySelector(".mot-processing-overlay");
     if (!isProcessing) {
       existing?.remove();
       return;
     }
-    if (existing) return;
+    if (existing) {
+      const textEl = existing.querySelector(".mot-processing-text");
+      if (textEl) textEl.textContent = statusText;
+      return;
+    }
 
     const overlay = document.createElement("div");
     overlay.className = "mot-processing-overlay";
     overlay.innerHTML = `
       <div class="mot-spinner"></div>
-      <div class="mot-processing-text">Translating Manga…</div>
+      <div class="mot-processing-text">${escapeHtml(statusText)}</div>
     `;
 
     const parent = record.img.parentElement;
@@ -970,13 +1014,18 @@
     if (state.scanning || !state.settings.enabled) return;
 
     const visibleCandidates = getVisibleCandidateImages();
+    if (visibleCandidates.length === 0) {
+      showToast("No manga pages detected in your browser window. Scroll to a page and try again.", 3500, "info");
+      return;
+    }
+
     const untranslated = visibleCandidates.filter(img => {
       const rec = state.images.get(imageKey(img));
       return !rec || rec.status !== "done";
     });
 
     if (untranslated.length === 0) {
-      console.info("[ScanTranslator] Current visible manga page is already translated or not found.");
+      showToast("The visible manga page is already translated! Press 'H' to toggle Japanese/English.", 3000, "success");
       return;
     }
 
@@ -1109,10 +1158,18 @@
 
     const transBtn = hud.querySelector("#mot-hud-translate");
     transBtn.addEventListener("click", async () => {
+      transBtn.disabled = true;
       transBtn.innerHTML = `<span>⏳ Translating…</span>`;
-      state.settings.enabled = true;
-      await translateCurrentVisiblePage();
-      transBtn.innerHTML = `<span>✨ Translate</span>`;
+      try {
+        state.settings.enabled = true;
+        await translateCurrentVisiblePage();
+      } catch (err) {
+        console.error("[ScanTranslator] Translate button error:", err);
+        showToast(`Translation error: ${err.message}`, 4500, "error");
+      } finally {
+        transBtn.disabled = false;
+        transBtn.innerHTML = `<span>✨ Translate</span>`;
+      }
     });
 
     const compBtn = hud.querySelector("#mot-hud-compare");
@@ -1187,6 +1244,7 @@
           state.settings.enabled = true;
           translateCurrentVisiblePage().catch(err => {
             console.error("[ScanTranslator] Translate error:", err);
+            showToast(`Translation error: ${err.message}`, 4500, "error");
           });
           sendResponse({ ok: true });
           return false;
@@ -1200,11 +1258,15 @@
 
         case "GET_STATUS": {
           const all = Array.from(state.images.values());
+          const lastError = all.find(x => x.status === "error")?.error || null;
+          const workingCount = all.filter(x => x.status === "working").length;
           sendResponse({
             ok: true,
             totalImages: all.length,
             translated: all.filter(x => x.status === "done").length,
-            errors: all.filter(x => x.status === "error").length
+            working: workingCount,
+            errors: all.filter(x => x.status === "error").length,
+            lastError
           });
           return false;
         }

@@ -40,9 +40,9 @@
         };
       case "ollama":
         return {
-          model: "llama3.2-vision",
+          model: "minicpm-v",
           endpoint: "http://localhost:11434/v1",
-          hint: "Ollama: 100% Free, local & private. Run <code>ollama run llama3.2-vision</code> in PowerShell.",
+          hint: "Ollama: 100% Free, local & private. Run <code>ollama run minicpm-v</code> in PowerShell.",
           keyLink: "https://ollama.com",
           keyLabel: "Download Ollama ↗"
         };
@@ -91,8 +91,9 @@
       { id: "gemini-1.5-flash", label: "gemini-1.5-flash" }
     ],
     ollama: [
+      { id: "minicpm-v", label: "minicpm-v (Recommended - Top Japanese OCR)" },
+      { id: "minicpm-v:latest", label: "minicpm-v:latest" },
       { id: "llama3.2-vision", label: "llama3.2-vision (11B Multimodal)" },
-      { id: "minicpm-v", label: "minicpm-v (High-Res OCR & Text)" },
       { id: "llama3.2-vision:11b", label: "llama3.2-vision:11b" },
       { id: "qwen2.5-vl", label: "qwen2.5-vl (Asian OCR Specialist)" }
     ],
@@ -217,6 +218,9 @@
     if (state.settings.model === "gemini-1.5-pro" || !state.settings.model) {
       state.settings.model = "gemini-2.5-flash";
     }
+    if (state.settings.provider === "ollama" && (state.settings.model === "llama3.2-vision" || !state.settings.model)) {
+      state.settings.model = "minicpm-v";
+    }
 
     state.apiKey = String(stored.apiKey || "").trim();
 
@@ -313,11 +317,22 @@
     }
   }
 
+  let pollStatusTimer = null;
+
   async function queryActiveTabStatus() {
     try {
       const res = await sendToCurrentTab({ type: "GET_STATUS" });
       if (res?.ok) {
-        $("pageStats").textContent = `Images on page: ${res.totalImages} (${res.translated} translated)`;
+        if (res.working > 0) {
+          const prov = state.settings.provider === "ollama" ? "Local AI" : "AI";
+          $("pageStats").textContent = `Translating manga page with ${prov}… (${res.translated} done)`;
+          clearTimeout(pollStatusTimer);
+          pollStatusTimer = setTimeout(queryActiveTabStatus, 1000);
+        } else if (res.errors > 0 && res.lastError) {
+          $("pageStats").textContent = `Error: ${res.lastError}`;
+        } else {
+          $("pageStats").textContent = `Images on page: ${res.totalImages} (${res.translated} translated)`;
+        }
       } else {
         $("pageStats").textContent = "Ready on manga reader page.";
       }
@@ -496,16 +511,20 @@
   $("testApi").addEventListener("click", testApiConnection);
 
   $("translate").addEventListener("click", async () => {
+    const btn = $("translate");
+    btn.disabled = true;
     try {
       await save();
       const status = $("pageStats");
       status.textContent = "Initiating canvas translation…";
       const res = await sendToCurrentTab({ type: "TRANSLATE_PAGE" });
       if (!res?.ok) throw new Error(res?.error || "Content script did not respond.");
-      status.textContent = "Translating manga pages in-place…";
-      setTimeout(queryActiveTabStatus, 1800);
+      status.textContent = "Translating manga page…";
+      setTimeout(queryActiveTabStatus, 600);
     } catch (err) {
       $("pageStats").textContent = "Error: " + err.message;
+    } finally {
+      setTimeout(() => { btn.disabled = false; }, 1200);
     }
   });
 

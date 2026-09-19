@@ -8,7 +8,7 @@ const DEFAULT_MODEL = "gemini-2.5-flash";
 const DEFAULT_OPENAI_MODEL = "gpt-4o-mini";
 const DEFAULT_GROQ_MODEL = "llama-3.2-11b-vision-preview";
 const DEFAULT_OPENROUTER_MODEL = "google/gemini-2.0-flash-exp:free";
-const DEFAULT_OLLAMA_MODEL = "llama3.2-vision";
+const DEFAULT_OLLAMA_MODEL = "minicpm-v";
 const DEFAULT_OLLAMA_ENDPOINT = "http://localhost:11434/v1";
 const DEFAULT_ENDPOINT = "";
 const MAX_IMAGE_BYTES = 25 * 1024 * 1024; // 25MB max
@@ -42,6 +42,7 @@ For each dialogue region:
    - "translation": High-quality localized English translation formatted in UPPERCASE suitable for comic book lettering. Preserve emotion, comic nuance, character voice, and pacing. Keep it punchy and natural.
 
 CRITICAL:
+- Detect and translate ALL speech bubbles, dialogue, thought balloons, and narrations across the ENTIRE manga page from top to bottom, right to left. Include EVERY dialogue bubble on the page in the "regions" array; do NOT stop after only 1 bubble!
 - Do not skip small dialogue, whispered asides, or inverted dark bubbles.
 - All coordinate values MUST be between 0.0 and 1.0.
 - Return ONLY a valid JSON object without markdown fences, following this exact schema:
@@ -73,29 +74,151 @@ CRITICAL:
 }`;
 
 function stripMarkdownJson(text) {
-  const trimmed = String(text || "").trim();
-  if (!trimmed) return "";
-  const fenced = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
-  return fenced ? fenced[1].trim() : trimmed;
+  let s = String(text || "").trim();
+  if (!s) return "";
+
+  // 1. If wrapped in markdown code fence anywhere in response
+  const match = s.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+  if (match) {
+    return match[1].trim();
+  }
+
+  // 2. If it starts with backticks but missing closing fence (truncated)
+  if (s.startsWith("```")) {
+    s = s.replace(/^```(?:json)?\s*/i, "");
+  }
+
+  return s.trim();
 }
 
 function parseJsonOutput(text) {
-  const clean = stripMarkdownJson(text);
+  let clean = stripMarkdownJson(text);
   if (!clean) {
     throw new Error("The AI model returned an empty response.");
   }
 
+  // Stage 1: Direct JSON.parse
   try {
     return JSON.parse(clean);
-  } catch {}
+  } catch { }
 
-  const first = clean.indexOf("{");
-  const last = clean.lastIndexOf("}");
-  if (first >= 0 && last > first) {
+  // Stage 2: Extract from first '{' to last '}'
+  const firstBrace = clean.indexOf("{");
+  const lastBrace = clean.lastIndexOf("}");
+  if (firstBrace !== -1 && lastBrace > firstBrace) {
     try {
-      return JSON.parse(clean.slice(first, last + 1));
-    } catch {}
+      return JSON.parse(clean.slice(firstBrace, lastBrace + 1));
+    } catch { }
   }
+
+  // Stage 3: Sanitize unescaped newlines and trailing commas
+  let candidate = (firstBrace !== -1 ? clean.slice(firstBrace) : clean);
+  candidate = candidate.replace(/```[\s\S]*$/, "").trim();
+  // Fix trailing commas before closing braces/brackets
+  candidate = candidate.replace(/,\s*([\]}])/g, "$1");
+
+  try {
+    return JSON.parse(candidate);
+  } catch { }
+
+  // Stage 4: Auto-repair truncated JSON (e.g. model hit token limit mid-generation)
+  try {
+    let inString = false;
+    let escaped = false;
+    const stack = [];
+
+    for (let i = 0; i < candidate.length; i++) {
+      const char = candidate[i];
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+      if (char === "\\") {
+        escaped = true;
+        continue;
+      }
+      if (char === '"') {
+        inString = !inString;
+        continue;
+      }
+      if (inString) continue;
+
+      if (char === "{") stack.push("}");
+      else if (char === "[") stack.push("]");
+      else if (char === "}" || char === "]") {
+        if (stack.length && stack[stack.length - 1] === char) {
+          stack.pop();
+        }
+      }
+    }
+
+    let repaired = candidate;
+    // If cut off inside an unclosed string, close the quote
+    if (inString) {
+      repaired += '"';
+    }
+    // Remove any incomplete key/value or trailing comma before closing
+    repaired = repaired.replace(/,\s*$/, "");
+
+    // Close remaining open brackets in reverse
+    while (stack.length > 0) {
+      repaired += stack.pop();
+    }
+
+    const parsed = JSON.parse(repaired);
+    if (parsed && typeof parsed === "object") {
+      console.info("[ScanTranslator] Successfully repaired and parsed truncated JSON response.");
+      return parsed;
+    }
+  } catch { }
+
+  // Stage 5: Regex extraction fallback of any completed region objects
+  try {
+    const regionMatches = [];
+    const blockRegex = /\{[^{}]*?"translation"\s*:\s*"([\s\S]*?)"[^{}]*?\}/g;
+    let m;
+    while ((m = blockRegex.exec(clean)) !== null) {
+      try {
+        const item = JSON.parse(m[0]);
+        if (item.translation) regionMatches.push(item);
+      } catch {
+        // Fallback property extractor
+        const tMatch = m[0].match(/"translation"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"/i);
+        const sMatch = m[0].match(/"source_text"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"/i);
+        const bx = m[0].match(/"bubble_x"\s*:\s*([\d.]+)/i);
+        const by = m[0].match(/"bubble_y"\s*:\s*([\d.]+)/i);
+        const bw = m[0].match(/"bubble_w"\s*:\s*([\d.]+)/i);
+        const bh = m[0].match(/"bubble_h"\s*:\s*([\d.]+)/i);
+        if (tMatch && bx && by) {
+          regionMatches.push({
+            id: `bubble-${regionMatches.length + 1}`,
+            source_text: sMatch ? sMatch[1] : "",
+            translation: tMatch[1],
+            bubble_x: parseFloat(bx[1]),
+            bubble_y: parseFloat(by[1]),
+            bubble_w: bw ? parseFloat(bw[1]) : 0.15,
+            bubble_h: bh ? parseFloat(bh[1]) : 0.12,
+            mask_x: bx ? parseFloat(bx[1]) : 0.12,
+            mask_y: by ? parseFloat(by[1]) : 0.12,
+            mask_w: bw ? parseFloat(bw[1]) : 0.15,
+            mask_h: bh ? parseFloat(bh[1]) : 0.12,
+            background: "light",
+            text_color: "dark",
+            confidence: 0.95
+          });
+        }
+      }
+    }
+
+    if (regionMatches.length > 0) {
+      console.info(`[ScanTranslator] Rescued ${regionMatches.length} dialogue regions via pattern extraction.`);
+      return {
+        page_width: 1000,
+        page_height: 1500,
+        regions: regionMatches
+      };
+    }
+  } catch { }
 
   throw new Error("Could not parse AI response as JSON: " + clean.slice(0, 150) + "...");
 }
@@ -127,7 +250,7 @@ async function blobToDataUrl(blob) {
   return `data:${mime};base64,${btoa(binary)}`;
 }
 
-async function fetchImageAsDataUrl(url, pageUrl) {
+async function fetchImageAsDataUrl(url) {
   if (!url || !/^https?:|^data:|^blob:/i.test(url)) {
     throw new Error("Unsupported image URL scheme.");
   }
@@ -140,10 +263,7 @@ async function fetchImageAsDataUrl(url, pageUrl) {
 
   const response = await fetch(url, {
     method: "GET",
-    credentials: "include",
-    cache: "force-cache",
-    referrer: pageUrl || undefined,
-    referrerPolicy: "strict-origin-when-cross-origin"
+    cache: "force-cache"
   });
 
   if (!response.ok) {
@@ -287,7 +407,7 @@ async function callGemini({ apiKey, model, imageDataUrl }) {
       let json = null;
       try {
         json = JSON.parse(rawText);
-      } catch {}
+      } catch { }
 
       if (!response.ok) {
         const errorMsg = json?.error?.message || json?.error?.status || rawText || `Gemini HTTP ${response.status}`;
@@ -398,7 +518,7 @@ async function callOpenAI({ apiKey, model, imageDataUrl }) {
   let json = null;
   try {
     json = JSON.parse(rawText);
-  } catch {}
+  } catch { }
 
   if (!response.ok) {
     const errorMsg = json?.error?.message || rawText || `OpenAI HTTP ${response.status}`;
@@ -413,10 +533,23 @@ async function callOpenAI({ apiKey, model, imageDataUrl }) {
   return parseJsonOutput(content);
 }
 
+async function fetchInstalledOllamaModels(endpoint) {
+  let base = String(endpoint || DEFAULT_OLLAMA_ENDPOINT).trim().replace(/\/+$/, "");
+  base = base.replace(/\/v1(\/chat\/completions)?$/i, "");
+  try {
+    const res = await fetch(`${base}/api/tags`);
+    if (!res.ok) return [];
+    const data = await res.json();
+    return (data.models || []).map(m => m.name);
+  } catch {
+    return [];
+  }
+}
+
 /**
  * Custom OpenAI-compatible Chat API (Ollama, vLLM, OpenRouter, LM Studio, etc.)
  */
-async function callOpenAICompatible({ apiKey, model, imageDataUrl, endpoint }) {
+async function callOpenAICompatible({ apiKey, model, imageDataUrl, endpoint, isOllama = false }) {
   let url = String(endpoint || "").trim().replace(/\/+$/, "");
   if (!url) {
     throw new Error("Endpoint URL is required for Custom provider.");
@@ -425,10 +558,15 @@ async function callOpenAICompatible({ apiKey, model, imageDataUrl, endpoint }) {
     url = /\/v1$/i.test(url) ? `${url}/chat/completions` : `${url}/v1/chat/completions`;
   }
 
+  // Token optimization: 4096 tokens provides ample room for 25+ dialogue bubbles without cutoff
+  const maxTokens = isOllama ? 4096 : MAX_OUTPUT_TOKENS;
+
   const body = {
     model: model || "",
     temperature: 0.2,
-    max_tokens: MAX_OUTPUT_TOKENS,
+    max_tokens: maxTokens,
+    stream: false,
+    response_format: { type: "json_object" },
     messages: [
       {
         role: "system",
@@ -449,6 +587,11 @@ async function callOpenAICompatible({ apiKey, model, imageDataUrl, endpoint }) {
     ]
   };
 
+  if (isOllama) {
+    // Enable Ollama native JSON schema grammar constraint
+    body.format = "json";
+  }
+
   const headers = {
     "Content-Type": "application/json"
   };
@@ -456,17 +599,33 @@ async function callOpenAICompatible({ apiKey, model, imageDataUrl, endpoint }) {
     headers.Authorization = `Bearer ${apiKey}`;
   }
 
-  const response = await fetch(url, {
-    method: "POST",
-    headers,
-    body: JSON.stringify(body)
-  });
+  // Add 120s timeout for Ollama, 45s for cloud
+  const controller = new AbortController();
+  const timeoutMs = isOllama ? 120000 : 45000;
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+  let response;
+  try {
+    response = await fetch(url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body),
+      signal: controller.signal
+    });
+  } catch (err) {
+    if (err.name === "AbortError") {
+      throw new Error(`Request timed out after ${timeoutMs / 1000}s. ${isOllama ? "Local model took too long on CPU. Consider using free cloud models (Gemini 2.5 Flash / Groq) for instant <1s speed." : "Please check your network connection."}`);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timeoutId);
+  }
 
   const rawText = await response.text();
   let json = null;
   try {
     json = JSON.parse(rawText);
-  } catch {}
+  } catch { }
 
   if (!response.ok) {
     const errorMsg = json?.error?.message || rawText || `Custom Provider HTTP ${response.status}`;
@@ -490,13 +649,43 @@ async function analyzeImage({ provider, apiKey, model, endpoint, imageDataUrl })
   switch (activeProvider) {
     case "gemini":
       return callGemini({ apiKey, model, imageDataUrl });
-    case "ollama":
-      return callOpenAICompatible({
-        apiKey: apiKey || "ollama",
-        model: model || DEFAULT_OLLAMA_MODEL,
-        imageDataUrl,
-        endpoint: endpoint || DEFAULT_OLLAMA_ENDPOINT
-      });
+    case "ollama": {
+      const endpointUrl = endpoint || DEFAULT_OLLAMA_ENDPOINT;
+      let targetModel = model || DEFAULT_OLLAMA_MODEL;
+
+      try {
+        return await callOpenAICompatible({
+          apiKey: apiKey || "ollama",
+          model: targetModel,
+          imageDataUrl,
+          endpoint: endpointUrl,
+          isOllama: true
+        });
+      } catch (err) {
+        // If model not found (e.g. user had llama3.2-vision set, but installed minicpm-v),
+        // query installed tags and auto-fallback to the installed vision model!
+        if (/not found|404/i.test(err.message)) {
+          const installed = await fetchInstalledOllamaModels(endpointUrl);
+          console.warn(`[ScanTranslator] Ollama model '${targetModel}' not found. Installed:`, installed);
+          const visionModel = installed.find(m => /minicpm|vision|qwen.*vl/i.test(m)) || installed[0];
+          if (visionModel && visionModel !== targetModel) {
+            console.info(`[ScanTranslator] Auto-falling back to installed Ollama model: '${visionModel}'`);
+            const stored = await chrome.storage.local.get({ settings: {} });
+            await chrome.storage.local.set({
+              settings: { ...(stored.settings || {}), model: visionModel }
+            });
+            return await callOpenAICompatible({
+              apiKey: apiKey || "ollama",
+              model: visionModel,
+              imageDataUrl,
+              endpoint: endpointUrl,
+              isOllama: true
+            });
+          }
+        }
+        throw err;
+      }
+    }
     case "groq":
       return callOpenAICompatible({
         apiKey,
@@ -571,7 +760,7 @@ async function pingGemini(apiKey, model) {
 
       const text = await response.text();
       let json = null;
-      try { json = JSON.parse(text); } catch {}
+      try { json = JSON.parse(text); } catch { }
       const errorMsg = json?.error?.message || text || `HTTP ${response.status}`;
       lastError = new Error(`Gemini test failed for ${currentModel} (${response.status}): ${errorMsg.slice(0, 140)}`);
 
@@ -640,21 +829,28 @@ async function pingOllama(model, endpoint) {
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
     const installed = (data.models || []).map(m => m.name);
-    const target = model || DEFAULT_OLLAMA_MODEL;
-    const found = installed.some(m => m.toLowerCase().includes(target.toLowerCase()));
-    if (!found) {
-      if (installed.length === 0) {
-        return {
-          ok: true,
-          message: `Ollama is running, but no models found! Run in PowerShell: ollama run ${target}`
-        };
-      }
+    if (installed.length === 0) {
       return {
         ok: true,
-        message: `Ollama connected! Note: '${target}' not downloaded yet (found: ${installed.slice(0, 2).join(", ")}). Run: ollama run ${target}`
+        message: `Ollama is running, but no models found! Run in PowerShell: ollama run minicpm-v`
       };
     }
-    return { ok: true, message: `Connected to local Ollama with model: ${target}!` };
+
+    const target = model || DEFAULT_OLLAMA_MODEL;
+    const found = installed.some(m => m.toLowerCase().includes(target.toLowerCase()));
+
+    let activeModel = target;
+    if (!found) {
+      const visionModel = installed.find(m => /minicpm|vision|qwen.*vl/i.test(m)) || installed[0];
+      activeModel = visionModel;
+    }
+
+    return {
+      ok: true,
+      model: activeModel,
+      availableModels: installed,
+      message: `Connected to Ollama! Active model: ${activeModel}`
+    };
   } catch (err) {
     throw new Error(`Cannot reach Ollama at ${base}. Is Ollama running? (${err.message})`);
   }
@@ -688,10 +884,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     try {
       switch (message?.type) {
         case "FETCH_IMAGE": {
-          const dataUrl = await fetchImageAsDataUrl(
-            message.url,
-            message.pageUrl || sender?.url || ""
-          );
+          const dataUrl = await fetchImageAsDataUrl(message.url);
           sendResponse({ ok: true, dataUrl });
           return;
         }
