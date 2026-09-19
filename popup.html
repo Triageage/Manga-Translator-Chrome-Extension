@@ -67,18 +67,10 @@
       <div class="field-group">
         <label for="modelSelect">Model Selection</label>
         <select id="modelSelect">
-          <option value="gemini-3.8-flash" selected>gemini-3.8-flash (Recommended - Free Tier)</option>
-          <option value="gemini-2.0-flash">gemini-2.0-flash (Ultra Fast Vision)</option>
-          <option value="gemini-1.5-flash">gemini-1.5-flash (High Quota & Stability)</option>
-          <option value="llama3.2-vision">llama3.2-vision (Ollama Local Offline)</option>
-          <option value="minicpm-v">minicpm-v (Ollama Local High-Res OCR)</option>
-          <option value="llama-3.2-11b-vision-preview">llama-3.2-11b-vision (Groq Free)</option>
-          <option value="google/gemini-2.0-flash-exp:free">gemini-2.0-flash:free (OpenRouter Free)</option>
-          <option value="qwen/qwen-2.5-vl-72b-instruct:free">qwen-2.5-vl-72b:free (OpenRouter Free)</option>
-          <option value="custom">Custom Model ID…</option>
+          <!-- Populated dynamically based on selected Provider -->
         </select>
-        <input id="model" type="text" spellcheck="false" placeholder="gemini-3.8-flash" style="margin-top: 4px;">
-        <p id="modelHint" class="hint">Recommended: <code>gemini-3.8-flash</code> (Multimodal vision, sub-second latency).</p>
+        <input id="model" type="text" spellcheck="false" placeholder="gemini-2.5-flash" style="margin-top: 4px;">
+        <p id="modelHint" class="hint">Recommended: <code>gemini-2.5-flash</code> (Active Free tier vision in Google AI Studio).</p>
       </div>
 
       <div class="test-row">
@@ -145,6 +137,13 @@
         <label class="check-label">
           <input id="visibleOnly" type="checkbox" checked>
           <span>Translate visible manga pages first (Fast scroll)</span>
+        </label>
+      </div>
+
+      <div class="checkbox-row">
+        <label class="check-label">
+          <input id="autoTranslate" type="checkbox">
+          <span>⚡ Auto-translate manga pages as you scroll down</span>
         </label>
       </div>
     </section>

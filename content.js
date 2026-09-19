@@ -12,6 +12,7 @@
 
   const DEFAULTS = {
     enabled: true,
+    autoTranslate: false,
     fontFamily: "Comic Neue",
     customFont: null,
     fillRatio: 0.76,
@@ -21,7 +22,7 @@
     showTooltip: true,
     debug: false,
     provider: "gemini",
-    model: "gemini-3.8-flash",
+    model: "gemini-2.5-flash",
     endpoint: ""
   };
 
@@ -45,6 +46,7 @@
 
   function mergeSettings(input) {
     const next = { ...DEFAULTS, ...(input || {}) };
+    next.autoTranslate = Boolean(next.autoTranslate);
     next.fillRatio = Math.min(0.92, Math.max(0.50, Number(next.fillRatio) || DEFAULTS.fillRatio));
     next.revealOpacity = Math.min(0.50, Math.max(0.02, Number(next.revealOpacity) || DEFAULTS.revealOpacity));
     next.minConfidence = Math.min(1, Math.max(0, Number(next.minConfidence) || DEFAULTS.minConfidence));
@@ -950,15 +952,58 @@
      Scanning & Observers
      ========================================================================= */
 
-  async function processVisibleImages() {
+  function getVisibleCandidateImages() {
+    const all = getCandidateImages();
+    const scored = all.map(img => {
+      const rect = img.getBoundingClientRect();
+      const visibleHeight = Math.max(0, Math.min(rect.bottom, window.innerHeight) - Math.max(rect.top, 0));
+      const visibleWidth = Math.max(0, Math.min(rect.right, window.innerWidth) - Math.max(rect.left, 0));
+      const visibleArea = visibleHeight * visibleWidth;
+      return { img, rect, visibleArea };
+    }).filter(x => x.visibleArea > 0);
+
+    scored.sort((a, b) => b.visibleArea - a.visibleArea);
+    return scored.map(x => x.img);
+  }
+
+  async function translateCurrentVisiblePage() {
     if (state.scanning || !state.settings.enabled) return;
+
+    const visibleCandidates = getVisibleCandidateImages();
+    const untranslated = visibleCandidates.filter(img => {
+      const rec = state.images.get(imageKey(img));
+      return !rec || rec.status !== "done";
+    });
+
+    if (untranslated.length === 0) {
+      console.info("[ScanTranslator] Current visible manga page is already translated or not found.");
+      return;
+    }
+
+    state.scanning = true;
+    try {
+      // In manual mode: translate strictly the single primary page in view
+      const targetImg = untranslated[0];
+      await processImage(targetImg);
+    } finally {
+      state.scanning = false;
+    }
+  }
+
+  async function processAutoScrollImages() {
+    if (state.scanning || !state.settings.enabled || !state.settings.autoTranslate) return;
     state.scanning = true;
 
     try {
-      const candidates = getCandidateImages().filter(shouldProcessImage);
+      const candidates = getCandidateImages().filter(shouldProcessImage).filter(img => {
+        const rec = state.images.get(imageKey(img));
+        return !rec || rec.status !== "done";
+      });
+
       for (const img of candidates) {
+        if (!state.settings.autoTranslate) break;
         await processImage(img);
-        await new Promise(r => setTimeout(r, 40));
+        await new Promise(r => setTimeout(r, 60));
       }
     } finally {
       state.scanning = false;
@@ -966,19 +1011,22 @@
   }
 
   function scheduleScan(delay = 140) {
+    // Only schedule scans if autoTranslate is explicitly enabled by the user!
+    if (!state.settings.autoTranslate) return;
     clearTimeout(state.mutationTimer);
-    state.mutationTimer = setTimeout(() => processVisibleImages(), delay);
+    state.mutationTimer = setTimeout(() => processAutoScrollImages(), delay);
   }
 
   function observeImages() {
     state.observer?.disconnect();
     state.observer = new IntersectionObserver(
       entries => {
-        if (entries.some(e => e.isIntersecting)) {
+        // Only trigger auto-translation if the Auto toggle is active!
+        if (state.settings.autoTranslate && entries.some(e => e.isIntersecting)) {
           scheduleScan(80);
         }
       },
-      { root: null, rootMargin: "150% 0px" }
+      { root: null, rootMargin: "60% 0px" }
     );
 
     for (const img of getCandidateImages()) {
@@ -1001,7 +1049,9 @@
       }
       if (relevant) {
         observeImages();
-        scheduleScan(180);
+        if (state.settings.autoTranslate) {
+          scheduleScan(250);
+        }
       }
     });
 
@@ -1018,10 +1068,10 @@
       <div class="mot-hud-min-btn" title="Open Scan Translator Toolbar">✨</div>
       <div class="mot-hud-content">
         <span class="mot-hud-logo">ST</span>
-        <button id="mot-hud-auto" class="mot-hud-btn ${state.settings.autoTranslate ? 'active' : ''}" title="Auto-translate manga pages as you scroll down">
+        <button id="mot-hud-auto" class="mot-hud-btn" title="Toggle automatic translation as you scroll down">
           <span>⚡ Auto</span>
         </button>
-        <button id="mot-hud-translate" class="mot-hud-btn primary" title="Translate visible pages on screen (Hotkey: T)">
+        <button id="mot-hud-translate" class="mot-hud-btn primary" title="Translate current visible manga page (Hotkey: T)">
           <span>✨ Translate</span>
         </button>
         <button id="mot-hud-compare" class="mot-hud-btn" title="Toggle Raw Japanese / English (Hotkey: H)">
@@ -1039,12 +1089,21 @@
     minBtn.addEventListener("click", () => hud.classList.remove("minimized"));
 
     const autoBtn = hud.querySelector("#mot-hud-auto");
+    const updateAutoBtnUI = () => {
+      const isOn = Boolean(state.settings.autoTranslate);
+      autoBtn.classList.toggle("active", isOn);
+      autoBtn.innerHTML = isOn ? `<span>⚡ Auto ON</span>` : `<span>⚡ Auto</span>`;
+    };
+    updateAutoBtnUI();
+
     autoBtn.addEventListener("click", async () => {
       state.settings.autoTranslate = !state.settings.autoTranslate;
-      autoBtn.classList.toggle("active", state.settings.autoTranslate);
+      updateAutoBtnUI();
       await chrome.storage.local.set({ settings: state.settings });
       if (state.settings.autoTranslate) {
-        scheduleScan(20);
+        scheduleScan(50);
+      } else {
+        clearTimeout(state.mutationTimer);
       }
     });
 
@@ -1052,7 +1111,7 @@
     transBtn.addEventListener("click", async () => {
       transBtn.innerHTML = `<span>⏳ Translating…</span>`;
       state.settings.enabled = true;
-      await processVisibleImages();
+      await translateCurrentVisiblePage();
       transBtn.innerHTML = `<span>✨ Translate</span>`;
     });
 
@@ -1080,7 +1139,7 @@
 
     window.addEventListener("scroll", () => updateAllPositions(), { passive: true });
 
-    // Keyboard shortcuts: 'H' for Raw Toggle, 'T' for Translate Visible
+    // Keyboard shortcuts: 'H' for Raw Toggle, 'T' for Translate Visible Page
     window.addEventListener("keydown", e => {
       if (e.target.matches("input, textarea, select")) return;
       if (e.key.toLowerCase() === "h") {
@@ -1090,7 +1149,7 @@
           toggleImageMode(record, targetMode);
         }
       } else if (e.key.toLowerCase() === "t") {
-        processVisibleImages();
+        translateCurrentVisiblePage();
       }
     });
   }
@@ -1126,7 +1185,9 @@
       switch (message?.type) {
         case "TRANSLATE_PAGE": {
           state.settings.enabled = true;
-          scheduleScan(10);
+          translateCurrentVisiblePage().catch(err => {
+            console.error("[ScanTranslator] Translate error:", err);
+          });
           sendResponse({ ok: true });
           return false;
         }
@@ -1160,9 +1221,20 @@
 
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area !== "local" || !changes.settings) return;
+    const prevAuto = state.settings.autoTranslate;
     state.settings = mergeSettings(changes.settings.newValue);
     applyTypography();
-    scheduleScan(60);
+
+    const autoBtn = document.getElementById("mot-hud-auto");
+    if (autoBtn) {
+      const isOn = Boolean(state.settings.autoTranslate);
+      autoBtn.classList.toggle("active", isOn);
+      autoBtn.innerHTML = isOn ? `<span>⚡ Auto ON</span>` : `<span>⚡ Auto</span>`;
+    }
+
+    if (state.settings.autoTranslate && !prevAuto) {
+      scheduleScan(80);
+    }
   });
 
   /* =========================================================================
@@ -1176,8 +1248,9 @@
     observeImages();
     attachMutationObserver();
     attachWindowEvents();
+    // NEVER automatically translate on page load unless autoTranslate was saved as true!
     if (state.settings.autoTranslate) {
-      scheduleScan(100);
+      scheduleScan(200);
     }
   }
 

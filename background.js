@@ -4,7 +4,7 @@
  */
 
 const DEFAULT_PROVIDER = "gemini";
-const DEFAULT_MODEL = "gemini-3.8-flash";
+const DEFAULT_MODEL = "gemini-2.5-flash";
 const DEFAULT_OPENAI_MODEL = "gpt-4o-mini";
 const DEFAULT_GROQ_MODEL = "llama-3.2-11b-vision-preview";
 const DEFAULT_OPENROUTER_MODEL = "google/gemini-2.0-flash-exp:free";
@@ -15,11 +15,12 @@ const MAX_IMAGE_BYTES = 25 * 1024 * 1024; // 25MB max
 const MAX_OUTPUT_TOKENS = 8192;
 
 const GEMINI_FALLBACK_MODELS = [
+  "gemini-2.5-flash",
+  "gemini-2.5-flash-lite",
   "gemini-3.8-flash",
+  "gemini-3.5-flash",
   "gemini-2.0-flash",
-  "gemini-1.5-flash",
-  "gemini-2.0-flash-lite",
-  "gemini-1.5-pro"
+  "gemini-1.5-flash"
 ];
 
 const MANGA_PROMPT = `You are an expert manga localization and computer vision analysis engine.
@@ -156,12 +157,86 @@ async function fetchImageAsDataUrl(url, pageUrl) {
    Provider Implementations
    ========================================================================= */
 
+function cleanModelName(name) {
+  return String(name || "").replace(/^models\//, "").trim();
+}
+
+async function fetchAvailableGeminiModels(apiKey) {
+  const versions = ["v1beta", "v1"];
+  for (const ver of versions) {
+    try {
+      const url = `https://generativelanguage.googleapis.com/${ver}/models?key=${encodeURIComponent(apiKey)}`;
+      const res = await fetch(url);
+      if (!res.ok) continue;
+      const data = await res.json();
+      if (Array.isArray(data.models)) {
+        const supported = data.models
+          .filter(m => {
+            const methods = Array.isArray(m.supportedGenerationMethods) ? m.supportedGenerationMethods : [];
+            return methods.includes("generateContent");
+          })
+          .map(m => ({
+            id: cleanModelName(m.name),
+            displayName: m.displayName || cleanModelName(m.name),
+            version: ver
+          }));
+
+        if (supported.length > 0) {
+          return supported;
+        }
+      }
+    } catch (err) {
+      console.warn(`[ScanTranslator] Error listing Gemini models (${ver}):`, err);
+    }
+  }
+  return [];
+}
+
+function pickBestGeminiModel(availableModels, preferred) {
+  if (!availableModels || availableModels.length === 0) return null;
+
+  const modelIds = availableModels.map(m => m.id);
+
+  // 1. Exact match with preferred
+  if (preferred && modelIds.includes(cleanModelName(preferred))) {
+    return availableModels.find(m => m.id === cleanModelName(preferred));
+  }
+
+  // 2. High priority: Fast Flash models
+  const flashPriority = [
+    "gemini-2.5-flash",
+    "gemini-2.5-flash-lite",
+    "gemini-3.8-flash",
+    "gemini-3.5-flash",
+    "gemini-2.0-flash",
+    "gemini-1.5-flash"
+  ];
+
+  for (const prio of flashPriority) {
+    const match = availableModels.find(m => m.id.toLowerCase() === prio.toLowerCase());
+    if (match) return match;
+  }
+
+  // 3. Any model with "flash" in its ID
+  const anyFlash = availableModels.find(m => /flash/i.test(m.id));
+  if (anyFlash) return anyFlash;
+
+  // 4. Any model with "gemini" in its ID
+  const anyGemini = availableModels.find(m => /gemini/i.test(m.id));
+  if (anyGemini) return anyGemini;
+
+  return availableModels[0];
+}
+
 /**
  * Official Google Gemini REST API (v1beta generateContent)
  */
 async function callGemini({ apiKey, model, imageDataUrl }) {
   const { mimeType, base64 } = parseDataUrl(imageDataUrl);
-  const candidateModels = Array.from(new Set([model || DEFAULT_MODEL, ...GEMINI_FALLBACK_MODELS]));
+  let candidateModels = Array.from(new Set([
+    cleanModelName(model || DEFAULT_MODEL),
+    ...GEMINI_FALLBACK_MODELS.map(cleanModelName)
+  ]));
 
   const body = {
     system_instruction: {
@@ -193,8 +268,10 @@ async function callGemini({ apiKey, model, imageDataUrl }) {
   };
 
   let lastError = null;
+  let hasAttemptedDiscovery = false;
 
-  for (const currentModel of candidateModels) {
+  for (let i = 0; i < candidateModels.length; i++) {
+    const currentModel = candidateModels[i];
     try {
       const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(currentModel)}:generateContent?key=${encodeURIComponent(apiKey)}`;
 
@@ -214,11 +291,30 @@ async function callGemini({ apiKey, model, imageDataUrl }) {
 
       if (!response.ok) {
         const errorMsg = json?.error?.message || json?.error?.status || rawText || `Gemini HTTP ${response.status}`;
-        if (/404|not found|no longer available|deprecated|high demand|spikes in demand|overloaded|unavailable|resource_exhausted|quota|503|429/i.test(errorMsg) && currentModel !== candidateModels[candidateModels.length - 1]) {
-          console.warn(`[ScanTranslator] Gemini model ${currentModel} error (${errorMsg}), trying fallback model...`);
+
+        // If model not found or deprecated, query ModelService.ListModels to discover valid models for this key!
+        if (/404|not found|no longer available|deprecated|not supported for generateContent/i.test(errorMsg) && !hasAttemptedDiscovery) {
+          hasAttemptedDiscovery = true;
+          console.warn(`[ScanTranslator] Model '${currentModel}' returned not found. Querying Google ListModels API for valid models on your key...`);
+          const liveModels = await fetchAvailableGeminiModels(apiKey);
+          console.info("[ScanTranslator] Live models discovered on your API key:", liveModels.map(m => m.id));
+
+          if (liveModels.length > 0) {
+            const best = pickBestGeminiModel(liveModels, model);
+            if (best && !candidateModels.slice(0, i + 1).includes(best.id)) {
+              candidateModels.splice(i + 1, 0, best.id, ...liveModels.map(m => m.id).filter(id => !candidateModels.includes(id)));
+              lastError = new Error(`Google Gemini Error (${currentModel}): ${errorMsg}`);
+              continue;
+            }
+          }
+        }
+
+        if (/404|not found|no longer available|deprecated|high demand|spikes in demand|overloaded|unavailable|resource_exhausted|quota|503|429/i.test(errorMsg) && i < candidateModels.length - 1) {
+          console.warn(`[ScanTranslator] Gemini model '${currentModel}' failed (${errorMsg}), trying fallback '${candidateModels[i + 1]}'...`);
           lastError = new Error(`Google Gemini Error (${currentModel}): ${errorMsg}`);
           continue;
         }
+
         throw new Error(`Google Gemini Error: ${errorMsg}`);
       }
 
@@ -235,6 +331,7 @@ async function callGemini({ apiKey, model, imageDataUrl }) {
       }
 
       if (currentModel !== model) {
+        console.info(`[ScanTranslator] Automatically updating active Gemini model to working model: ${currentModel}`);
         const stored = await chrome.storage.local.get({ settings: {} });
         await chrome.storage.local.set({
           settings: { ...(stored.settings || {}), model: currentModel }
@@ -243,7 +340,7 @@ async function callGemini({ apiKey, model, imageDataUrl }) {
 
       return parseJsonOutput(textOutput);
     } catch (err) {
-      if (/404|not found|no longer available|deprecated|high demand|spikes in demand|overloaded|unavailable|resource_exhausted|quota|503|429/i.test(err.message) && currentModel !== candidateModels[candidateModels.length - 1]) {
+      if (/404|not found|no longer available|deprecated|high demand|spikes in demand|overloaded|unavailable|resource_exhausted|quota|503|429/i.test(err.message) && i < candidateModels.length - 1) {
         console.warn(`[ScanTranslator] Retrying with fallback model after: ${err.message}`);
         lastError = err;
         continue;
@@ -252,7 +349,7 @@ async function callGemini({ apiKey, model, imageDataUrl }) {
     }
   }
 
-  throw lastError || new Error("Failed to process manga image with available Gemini models.");
+  throw lastError || new Error("Failed to process manga image with available Gemini models. Please test your API key in the extension popup.");
 }
 
 /**
@@ -429,7 +526,24 @@ async function analyzeImage({ provider, apiKey, model, endpoint, imageDataUrl })
    ========================================================================= */
 
 async function pingGemini(apiKey, model) {
-  const candidateModels = Array.from(new Set([model || DEFAULT_MODEL, ...GEMINI_FALLBACK_MODELS]));
+  console.info("[ScanTranslator] Testing Gemini connection and querying available models from Google AI Studio...");
+  const liveModels = await fetchAvailableGeminiModels(apiKey);
+  console.info("[ScanTranslator] Live models returned by Google AI Studio:", liveModels);
+
+  let targetModel = cleanModelName(model || DEFAULT_MODEL);
+  if (liveModels.length > 0) {
+    const best = pickBestGeminiModel(liveModels, targetModel);
+    if (best) {
+      targetModel = best.id;
+    }
+  }
+
+  const candidateModels = Array.from(new Set([
+    targetModel,
+    ...liveModels.map(m => m.id),
+    ...GEMINI_FALLBACK_MODELS.map(cleanModelName)
+  ]));
+
   let lastError = null;
 
   for (const currentModel of candidateModels) {
@@ -444,18 +558,24 @@ async function pingGemini(apiKey, model) {
       });
 
       if (response.ok) {
-        if (currentModel !== model) {
-          const stored = await chrome.storage.local.get({ settings: {} });
-          await chrome.storage.local.set({
-            settings: { ...(stored.settings || {}), model: currentModel }
-          });
-        }
-        return currentModel;
+        const stored = await chrome.storage.local.get({ settings: {} });
+        await chrome.storage.local.set({
+          settings: { ...(stored.settings || {}), model: currentModel }
+        });
+        return {
+          model: currentModel,
+          availableModels: liveModels.map(m => m.id),
+          message: `Connected successfully to Google Gemini (${currentModel})!`
+        };
       }
 
       const text = await response.text();
-      lastError = new Error(`Gemini test failed for ${currentModel} (${response.status}): ${text.slice(0, 140)}`);
-      if (!/404|not found|no longer available|deprecated|high demand|spikes in demand|overloaded|unavailable|resource_exhausted|quota|503|429/i.test(text)) {
+      let json = null;
+      try { json = JSON.parse(text); } catch {}
+      const errorMsg = json?.error?.message || text || `HTTP ${response.status}`;
+      lastError = new Error(`Gemini test failed for ${currentModel} (${response.status}): ${errorMsg.slice(0, 140)}`);
+
+      if (!/404|not found|no longer available|deprecated|high demand|spikes in demand|overloaded|unavailable|resource_exhausted|quota|503|429/i.test(errorMsg)) {
         throw lastError;
       }
     } catch (err) {
@@ -466,7 +586,7 @@ async function pingGemini(apiKey, model) {
     }
   }
 
-  throw lastError || new Error("All Gemini models failed connection test.");
+  throw lastError || new Error("All Gemini models failed connection test. Please verify your Google AI Studio API key.");
 }
 
 async function pingOpenAI(apiKey, model) {
@@ -592,8 +712,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
           if (provider === "gemini") {
             if (!settings.apiKey) throw new Error("Please enter your Google Gemini API key.");
-            const workingModel = await pingGemini(settings.apiKey, settings.model);
-            sendResponse({ ok: true, model: workingModel, message: `Connected successfully to Google Gemini (${workingModel})!` });
+            const pingRes = await pingGemini(settings.apiKey, settings.model);
+            sendResponse({ ok: true, ...pingRes });
           } else if (provider === "ollama") {
             const pingRes = await pingOllama(settings.model || DEFAULT_OLLAMA_MODEL, settings.endpoint || DEFAULT_OLLAMA_ENDPOINT);
             sendResponse(pingRes);
