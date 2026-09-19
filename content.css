@@ -1,0 +1,340 @@
+/* =========================================================================
+   Scan Translator - Manga Canvas & Typesetting Stylesheet
+   ========================================================================= */
+
+@import url('https://fonts.googleapis.com/css2?family=Comic+Neue:ital,wght@0,400;0,700;1,700&display=swap');
+
+:root {
+  --mot-font-family: 'Comic Neue', 'Comic Sans MS', cursive, sans-serif;
+  --mot-primary: #6366f1;
+  --mot-primary-hover: #4f46e5;
+  --mot-bg-glass: rgba(18, 20, 29, 0.88);
+  --mot-border-glass: rgba(255, 255, 255, 0.14);
+  --mot-reveal-opacity: 0.10;
+}
+
+/* Master container for overlay interactions */
+#mot-root {
+  position: absolute !important;
+  inset: 0 !important;
+  width: 100% !important;
+  height: 100% !important;
+  pointer-events: none !important;
+  z-index: 2147483640 !important;
+  font-family: var(--mot-font-family) !important;
+}
+
+/* Page interaction layer synchronized with the manga image */
+.mot-page-layer {
+  position: absolute !important;
+  pointer-events: none !important;
+  box-sizing: border-box !important;
+}
+
+/* Processing indicator overlay */
+.mot-processing-overlay {
+  position: absolute !important;
+  inset: 0 !important;
+  background: rgba(10, 12, 18, 0.55) !important;
+  backdrop-filter: blur(2px) !important;
+  display: flex !important;
+  flex-direction: column !important;
+  align-items: center !important;
+  justify-content: center !important;
+  gap: 12px !important;
+  color: #ffffff !important;
+  z-index: 10 !important;
+  pointer-events: auto !important;
+  border-radius: 4px !important;
+  animation: motFadeIn 0.25s ease-out !important;
+}
+
+.mot-spinner {
+  width: 38px !important;
+  height: 38px !important;
+  border: 3px solid rgba(255, 255, 255, 0.25) !important;
+  border-top-color: #6366f1 !important;
+  border-radius: 50% !important;
+  animation: motSpin 0.75s linear infinite !important;
+}
+
+.mot-processing-text {
+  font-family: system-ui, -apple-system, sans-serif !important;
+  font-size: 13px !important;
+  font-weight: 600 !important;
+  letter-spacing: 0.02em !important;
+  color: #f1f5f9 !important;
+  background: rgba(0, 0, 0, 0.6) !important;
+  padding: 4px 12px !important;
+  border-radius: 20px !important;
+  border: 1px solid rgba(255, 255, 255, 0.15) !important;
+}
+
+/* Floating compare button (Raw vs Translated) */
+.mot-page-toggle {
+  position: absolute !important;
+  top: 10px !important;
+  right: 10px !important;
+  background: var(--mot-bg-glass) !important;
+  backdrop-filter: blur(12px) !important;
+  border: 1px solid var(--mot-border-glass) !important;
+  color: #ffffff !important;
+  padding: 6px 14px !important;
+  border-radius: 20px !important;
+  font-family: system-ui, -apple-system, sans-serif !important;
+  font-size: 11px !important;
+  font-weight: 700 !important;
+  letter-spacing: 0.04em !important;
+  cursor: pointer !important;
+  pointer-events: auto !important;
+  z-index: 20 !important;
+  display: flex !important;
+  align-items: center !important;
+  gap: 6px !important;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4) !important;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1) !important;
+  user-select: none !important;
+}
+
+.mot-page-toggle:hover {
+  background: rgba(99, 102, 241, 0.85) !important;
+  border-color: rgba(255, 255, 255, 0.35) !important;
+  transform: translateY(-1px) scale(1.03) !important;
+}
+
+.mot-page-toggle.active {
+  background: #22c55e !important;
+  color: #000000 !important;
+  border-color: #86efac !important;
+}
+
+/* Speech bubble interactive hotspot */
+.mot-bubble-hotspot {
+  position: absolute !important;
+  pointer-events: auto !important;
+  cursor: help !important;
+  border-radius: 40% !important;
+  transition: box-shadow 0.18s ease, background-color 0.18s ease !important;
+  z-index: 5 !important;
+}
+
+.mot-bubble-hotspot:hover {
+  box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.85), 0 0 16px rgba(99, 102, 241, 0.45) !important;
+  background: rgba(99, 102, 241, 0.08) !important;
+}
+
+/* Lens that reveals the original Japanese raw bubble on hover */
+.mot-reveal-lens {
+  position: absolute !important;
+  inset: 0 !important;
+  pointer-events: none !important;
+  opacity: 0 !important;
+  transition: opacity 0.15s ease-out !important;
+  border-radius: 35% !important;
+  overflow: hidden !important;
+}
+
+.mot-bubble-hotspot:hover .mot-reveal-lens {
+  opacity: 1 !important;
+}
+
+/* Sleek Floating Inspection Tooltip */
+.mot-tooltip {
+  position: fixed !important;
+  pointer-events: none !important;
+  background: rgba(15, 18, 26, 0.95) !important;
+  backdrop-filter: blur(16px) !important;
+  border: 1px solid rgba(255, 255, 255, 0.18) !important;
+  border-radius: 10px !important;
+  padding: 10px 14px !important;
+  color: #f8fafc !important;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.55), 0 0 1px rgba(255, 255, 255, 0.2) !important;
+  max-width: 320px !important;
+  z-index: 2147483647 !important;
+  font-family: system-ui, -apple-system, sans-serif !important;
+  animation: motTooltipPop 0.18s cubic-bezier(0.16, 1, 0.3, 1) !important;
+}
+
+.mot-tooltip-badge {
+  display: inline-block !important;
+  font-size: 9px !important;
+  font-weight: 800 !important;
+  text-transform: uppercase !important;
+  letter-spacing: 0.06em !important;
+  padding: 2px 6px !important;
+  border-radius: 4px !important;
+  background: #4f46e5 !important;
+  color: #ffffff !important;
+  margin-bottom: 6px !important;
+}
+
+.mot-tooltip-raw {
+  font-family: "Hiragino Kaku Gothic ProN", "Yu Gothic", "Meiryo", sans-serif !important;
+  font-size: 13px !important;
+  line-height: 1.45 !important;
+  color: #fcd34d !important;
+  margin-bottom: 6px !important;
+  border-left: 2px solid #f59e0b !important;
+  padding-left: 8px !important;
+  white-space: pre-wrap !important;
+}
+
+.mot-tooltip-trans {
+  font-family: var(--mot-font-family) !important;
+  font-size: 13px !important;
+  font-weight: 700 !important;
+  line-height: 1.35 !important;
+  color: #ffffff !important;
+  letter-spacing: 0.02em !important;
+}
+
+.mot-tooltip-footer {
+  margin-top: 6px !important;
+  font-size: 10px !important;
+  color: #94a3b8 !important;
+  display: flex !important;
+  justify-content: space-between !important;
+}
+
+/* Animations */
+@keyframes motSpin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+@keyframes motFadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes motTooltipPop {
+  from {
+    opacity: 0;
+    transform: translateY(4px) scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+/* =========================================================================
+   On-Page Manga Floating Controller (HUD)
+   ========================================================================= */
+
+#mot-floating-hud {
+  position: fixed !important;
+  bottom: 24px !important;
+  right: 24px !important;
+  z-index: 2147483646 !important;
+  display: flex !important;
+  align-items: center !important;
+  background: rgba(14, 17, 26, 0.94) !important;
+  backdrop-filter: blur(18px) !important;
+  border: 1px solid rgba(255, 255, 255, 0.16) !important;
+  border-radius: 40px !important;
+  padding: 6px 10px !important;
+  gap: 8px !important;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6), 0 0 1px rgba(255, 255, 255, 0.25) !important;
+  font-family: system-ui, -apple-system, sans-serif !important;
+  transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1) !important;
+  user-select: none !important;
+}
+
+#mot-floating-hud.minimized {
+  padding: 0 !important;
+  width: 44px !important;
+  height: 44px !important;
+  border-radius: 50% !important;
+  justify-content: center !important;
+  cursor: pointer !important;
+}
+
+#mot-floating-hud.minimized .mot-hud-content {
+  display: none !important;
+}
+
+#mot-floating-hud.minimized .mot-hud-min-btn {
+  display: flex !important;
+}
+
+.mot-hud-min-btn {
+  display: none !important;
+  align-items: center !important;
+  justify-content: center !important;
+  width: 100% !important;
+  height: 100% !important;
+  font-size: 18px !important;
+  color: #a5b4fc !important;
+}
+
+.mot-hud-content {
+  display: flex !important;
+  align-items: center !important;
+  gap: 8px !important;
+}
+
+.mot-hud-logo {
+  font-weight: 800 !important;
+  font-size: 11px !important;
+  background: linear-gradient(135deg, #6366f1, #a855f7) !important;
+  color: #fff !important;
+  padding: 4px 8px !important;
+  border-radius: 14px !important;
+  letter-spacing: 0.05em !important;
+}
+
+.mot-hud-btn {
+  background: #1e2333 !important;
+  border: 1px solid rgba(255, 255, 255, 0.12) !important;
+  color: #f1f5f9 !important;
+  padding: 6px 12px !important;
+  border-radius: 20px !important;
+  font-size: 11.5px !important;
+  font-weight: 600 !important;
+  cursor: pointer !important;
+  display: flex !important;
+  align-items: center !important;
+  gap: 6px !important;
+  transition: all 0.18s ease !important;
+  white-space: nowrap !important;
+}
+
+.mot-hud-btn:hover {
+  background: #2b3248 !important;
+  transform: translateY(-1px) !important;
+}
+
+.mot-hud-btn.primary {
+  background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%) !important;
+  color: #ffffff !important;
+  border-color: transparent !important;
+  box-shadow: 0 2px 10px rgba(99, 102, 241, 0.35) !important;
+}
+
+.mot-hud-btn.primary:hover {
+  filter: brightness(1.1) !important;
+}
+
+.mot-hud-btn.active {
+  background: #22c55e !important;
+  color: #000000 !important;
+  border-color: #86efac !important;
+  font-weight: 800 !important;
+}
+
+.mot-hud-close {
+  background: transparent !important;
+  border: none !important;
+  color: #94a3b8 !important;
+  cursor: pointer !important;
+  font-size: 13px !important;
+  padding: 4px 6px !important;
+  border-radius: 50% !important;
+  line-height: 1 !important;
+}
+
+.mot-hud-close:hover {
+  color: #ffffff !important;
+  background: rgba(255, 255, 255, 0.1) !important;
+}

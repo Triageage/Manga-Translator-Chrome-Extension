@@ -1,0 +1,35 @@
+{
+  "manifest_version": 3,
+  "name": "Scan Translator - Manga Canvas & Typesetting",
+  "version": "2.0.0",
+  "description": "Translates Japanese manga pages using HTML5 Canvas inpainting, clean Japanese text erasure, and professional comic typesetting.",
+  "minimum_chrome_version": "110",
+  "permissions": [
+    "storage",
+    "activeTab",
+    "scripting",
+    "unlimitedStorage"
+  ],
+  "host_permissions": [
+    "<all_urls>",
+    "https://api.openai.com/*",
+    "https://generativelanguage.googleapis.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "Manga Canvas Translator",
+    "default_popup": "popup.html"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "css": ["content.css"],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ]
+}
